@@ -13,26 +13,28 @@ export interface ChannelConfig {
 
 // BeatStep Pro drum pad default mapping (can be customized)
 // BSP drum pads send notes starting from C1 (36) by default
-const DRUM_ICONS: Record<string, string> = {
-	// Row 1 (pads 1-8): C1 to G1
-	C1: "K",   // Pad 1 - Kick
-	"C#1": "S", // Pad 2 - Snare
-	D1: "H",   // Pad 3 - Hi-hat closed
-	"D#1": "O", // Pad 4 - Hi-hat open
-	E1: "T",   // Pad 5 - Tom
-	F1: "C",   // Pad 6 - Clap
-	"F#1": "R", // Pad 7 - Rim
-	G1: "B",   // Pad 8 - Bell
-	// Row 2 (pads 9-16): G#1 to D#2
-	"G#1": "P", // Pad 9 - Perc
-	A1: "P",   // Pad 10
-	"A#1": "P", // Pad 11
-	B1: "P",   // Pad 12
-	C2: "K",   // Pad 13 - Kick alt
-	"C#2": "S", // Pad 14 - Snare alt
-	D2: "H",   // Pad 15 - Hat alt
-	"D#2": "R", // Pad 16 - Ride
+const DRUM_NAMES: Record<number, string> = {
+	36: "Kick",        // C1  - Pad 1
+	37: "Snare",       // C#1 - Pad 2
+	38: "HiHat",       // D1  - Pad 3
+	39: "HiHat Op",    // D#1 - Pad 4
+	40: "Tom",         // E1  - Pad 5
+	41: "Clap",        // F1  - Pad 6
+	42: "Rim",         // F#1 - Pad 7
+	43: "Bell",        // G1  - Pad 8
+	44: "Perc 1",      // G#1 - Pad 9
+	45: "Perc 2",      // A1  - Pad 10
+	46: "Perc 3",      // A#1 - Pad 11
+	47: "Perc 4",      // B1  - Pad 12
+	48: "Kick Alt",    // C2  - Pad 13
+	49: "Snare Alt",   // C#2 - Pad 14
+	50: "HiHat Alt",   // D2  - Pad 15
+	51: "Ride",        // D#2 - Pad 16
 };
+
+function drumName(midiNote: number, noteName: string): string {
+	return DRUM_NAMES[midiNote] ?? noteName;
+}
 
 const TYPE_EMOJI: Record<string, string> = {
 	bass: "🎵",
@@ -53,7 +55,6 @@ export function renderPatternLine(
 ): string {
 	const emoji = config ? (TYPE_EMOJI[config.type] || "🔊") : "🔊";
 	const label = config?.name ?? `Ch${pattern.channel}`;
-	const isDrums = config?.type === "drums";
 
 	// Build prefix
 	const prefix = `${emoji} Ch${pattern.channel.toString().padStart(2)} ${label.padEnd(10).slice(0, 10)} │ `;
@@ -67,11 +68,6 @@ export function renderPatternLine(
 		const step = pattern.steps[i];
 		if (!step || step.notes.length === 0) {
 			cells += " ·  ";
-		} else if (isDrums) {
-			// Show icons for all hits on this step (up to 3)
-			const icons = step.notes.map(n => DRUM_ICONS[n.note_name] ?? "x");
-			const cell = icons.slice(0, 3).join("");
-			cells += cell.padEnd(4).slice(0, 4);
 		} else {
 			const name = step.notes[0].note_name;
 			cells += name.padEnd(4).slice(0, 4);
@@ -79,6 +75,79 @@ export function renderPatternLine(
 	}
 
 	return prefix + cells;
+}
+
+/**
+ * Render a drum channel as a tree: header row + one sub-row per active instrument.
+ * Each sub-row shows hits as "x" and empty steps as "·".
+ */
+export function renderDrumLines(
+	pattern: PatternData,
+	config: ChannelConfig | undefined,
+	maxWidth: number,
+): string[] {
+	const emoji = TYPE_EMOJI.drums;
+	const label = config?.name ?? `Ch${pattern.channel}`;
+
+	// Collect all active MIDI notes across the pattern
+	const activeNotes = new Map<number, { noteName: string; steps: Set<number> }>();
+	for (const step of pattern.steps) {
+		for (const note of step.notes) {
+			let entry = activeNotes.get(note.note);
+			if (!entry) {
+				entry = { noteName: note.note_name, steps: new Set() };
+				activeNotes.set(note.note, entry);
+			}
+			entry.steps.add(step.step); // 1-indexed
+		}
+	}
+
+	if (activeNotes.size === 0) {
+		return []; // No drum hits, skip entirely
+	}
+
+	// Sort by MIDI note number
+	const sortedNotes = [...activeNotes.entries()].sort((a, b) => a[0] - b[0]);
+
+	// Build the header row (no step data, just the channel label)
+	const headerPrefix = `${emoji} Ch${pattern.channel.toString().padStart(2)} ${label.padEnd(10).slice(0, 10)} │ `;
+
+	const stepsAvailable = maxWidth - headerPrefix.length;
+	const cellWidth = 4;
+	const maxSteps = Math.min(pattern.pattern_length, Math.floor(stepsAvailable / cellWidth));
+
+	// Step numbers header
+	let stepNums = "";
+	for (let i = 1; i <= maxSteps; i++) {
+		stepNums += i.toString().padEnd(4).slice(0, 4);
+	}
+
+	const lines: string[] = [];
+	lines.push(`${headerPrefix}${stepNums}`);
+
+	// Sub-row prefix: indented, with drum name
+	// e.g. "   ├ Kick (36)     │ "
+	for (let idx = 0; idx < sortedNotes.length; idx++) {
+		const [midiNote, entry] = sortedNotes[idx];
+		const isLast = idx === sortedNotes.length - 1;
+		const branch = isLast ? "└" : "├";
+		const name = drumName(midiNote, entry.noteName);
+		const subLabel = `${name} (${midiNote})`;
+		const subPrefix = `   ${branch} ${subLabel.padEnd(14).slice(0, 14)} │ `;
+
+		let cells = "";
+		for (let i = 1; i <= maxSteps; i++) {
+			if (entry.steps.has(i)) {
+				cells += " x  ";
+			} else {
+				cells += " ·  ";
+			}
+		}
+
+		lines.push(subPrefix + cells);
+	}
+
+	return lines;
 }
 
 /**
@@ -104,7 +173,11 @@ export function renderWidget(
 	for (const [chNum, config] of [...channelConfigs.entries()].sort((a, b) => a[0] - b[0])) {
 		const pat = patterns[chNum.toString()];
 		if (pat && pat.has_notes) {
-			lines.push(renderPatternLine(pat, config, maxWidth));
+			if (config.type === "drums") {
+				lines.push(...renderDrumLines(pat, config, maxWidth));
+			} else {
+				lines.push(renderPatternLine(pat, config, maxWidth));
+			}
 			rendered.add(chNum);
 		}
 	}
