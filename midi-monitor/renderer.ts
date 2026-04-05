@@ -11,23 +11,27 @@ export interface ChannelConfig {
 	patternLength?: number;
 }
 
+// BeatStep Pro drum pad default mapping (can be customized)
+// BSP drum pads send notes starting from C1 (36) by default
 const DRUM_ICONS: Record<string, string> = {
-	// General MIDI drum map (common ones)
-	C1: "K",  // Kick
-	"C#1": "K", // Kick variant
-	D1: "S",  // Snare
-	"D#1": "S",
-	E1: "S",  // Snare variant
-	"F#1": "H", // Hi-hat closed
-	"G#1": "H", // Hi-hat open
-	"A#1": "H", // Hi-hat
-	"C#2": "C", // Crash
-	"D#2": "R", // Ride
-	// Also map by note name for flexibility
-	C2: "K",
-	D2: "S",
-	F2: "H",
-	A2: "C",
+	// Row 1 (pads 1-8): C1 to G1
+	C1: "K",   // Pad 1 - Kick
+	"C#1": "S", // Pad 2 - Snare
+	D1: "H",   // Pad 3 - Hi-hat closed
+	"D#1": "O", // Pad 4 - Hi-hat open
+	E1: "T",   // Pad 5 - Tom
+	F1: "C",   // Pad 6 - Clap
+	"F#1": "R", // Pad 7 - Rim
+	G1: "B",   // Pad 8 - Bell
+	// Row 2 (pads 9-16): G#1 to D#2
+	"G#1": "P", // Pad 9 - Perc
+	A1: "P",   // Pad 10
+	"A#1": "P", // Pad 11
+	B1: "P",   // Pad 12
+	C2: "K",   // Pad 13 - Kick alt
+	"C#2": "S", // Pad 14 - Snare alt
+	D2: "H",   // Pad 15 - Hat alt
+	"D#2": "R", // Pad 16 - Ride
 };
 
 const TYPE_EMOJI: Record<string, string> = {
@@ -55,21 +59,20 @@ export function renderPatternLine(
 	const prefix = `${emoji} Ch${pattern.channel.toString().padStart(2)} ${label.padEnd(10).slice(0, 10)} │ `;
 
 	const stepsAvailable = maxWidth - prefix.length;
-	const cellWidth = isDrums ? 2 : 3; // drums are compact
+	const cellWidth = 4;
 	const maxSteps = Math.min(pattern.pattern_length, Math.floor(stepsAvailable / cellWidth));
 
 	let cells = "";
 	for (let i = 0; i < maxSteps; i++) {
 		const step = pattern.steps[i];
 		if (!step || step.notes.length === 0) {
-			cells += isDrums ? "··" : " ·· ";
+			cells += " ·  ";
 		} else if (isDrums) {
-			// Show drum icon for first note
-			const noteName = step.notes[0].note_name;
-			const icon = DRUM_ICONS[noteName] ?? "x";
-			cells += icon + (step.notes.length > 1 ? "+" : "·");
+			// Show icons for all hits on this step (up to 3)
+			const icons = step.notes.map(n => DRUM_ICONS[n.note_name] ?? "x");
+			const cell = icons.slice(0, 3).join("");
+			cells += cell.padEnd(4).slice(0, 4);
 		} else {
-			// Show note name (pad to 3 chars)
 			const name = step.notes[0].note_name;
 			cells += name.padEnd(4).slice(0, 4);
 		}

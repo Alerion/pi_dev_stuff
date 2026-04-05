@@ -72,7 +72,12 @@ interface ProjectEntry {
 export default function midiMonitorExtension(pi: ExtensionAPI) {
 	let pythonProcess: ChildProcess | null = null;
 	let ipc: MidiIPC | null = null;
-	let channelConfigs = new Map<number, ChannelConfig>();
+	// Default channel config for BeatStep Pro (Seq1=Ch1, Seq2=Ch2, Drum=Ch10)
+	let channelConfigs = new Map<number, ChannelConfig>([
+		[1, { channel: 1, name: "Bass", type: "bass", patternLength: 16 }],
+		[2, { channel: 2, name: "Lead", type: "lead", patternLength: 16 }],
+		[10, { channel: 10, name: "Drums", type: "drums", patternLength: 16 }],
+	]);
 	let projectName = "";
 	let widgetInterval: ReturnType<typeof setInterval> | null = null;
 	let widgetEnabled = true;
@@ -214,8 +219,15 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	const DEFAULT_CONFIGS = new Map<number, ChannelConfig>([
+		[1, { channel: 1, name: "Bass", type: "bass", patternLength: 16 }],
+		[2, { channel: 2, name: "Lead", type: "lead", patternLength: 16 }],
+		[10, { channel: 10, name: "Drums", type: "drums", patternLength: 16 }],
+	]);
+
 	function restoreConfig(ctx: ExtensionContext) {
-		channelConfigs.clear();
+		// Start with defaults, then override with any saved config
+		channelConfigs = new Map(DEFAULT_CONFIGS);
 		projectName = "";
 
 		for (const entry of ctx.sessionManager.getBranch()) {
