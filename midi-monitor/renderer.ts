@@ -2,7 +2,7 @@
  * Pattern rendering utilities for TUI widget and LLM text output.
  */
 
-import type { PatternData } from "./ipc.js";
+import type { PatternData } from "./midi-engine.js";
 
 export interface ChannelConfig {
 	channel: number;

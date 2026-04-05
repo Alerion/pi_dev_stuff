@@ -9,55 +9,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { spawn, type ChildProcess } from "node:child_process";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
 
-import { MidiIPC, type PatternData, type MonitorStatus } from "./ipc.js";
+import { MidiMonitor, type PatternData, type MonitorStatus, type MidiDevices } from "./midi-engine.js";
 import { type ChannelConfig, renderWidget, renderPatternText } from "./renderer.js";
-
-// Resolve path to midi_monitor.py relative to this file.
-// jiti may provide import.meta.url as a file:// URL or a plain path.
-function resolveExtDir(): string {
-	const url = import.meta.url;
-	if (url && url.startsWith("file:")) {
-		try {
-			return dirname(fileURLToPath(url));
-		} catch {}
-	}
-	if (url) {
-		return dirname(resolve(url));
-	}
-	// Fallback: use __dirname if available (CommonJS compat in jiti)
-	if (typeof __dirname !== "undefined") {
-		return __dirname;
-	}
-	// Last resort: resolve from cwd
-	return resolve(".");
-}
-
-const EXT_DIR = resolveExtDir();
-// On Windows (Git Bash), backslashes in paths get mangled by spawn.
-// Normalize to forward slashes so Python receives a valid path.
-const PYTHON_SCRIPT = resolve(EXT_DIR, "midi_monitor.py").replace(/\\/g, "/");
-
-// Find python executable - pi's Node process may not have the same PATH as the user's shell
-async function findPython(): Promise<string> {
-	const candidates = [
-		"python",
-		"python3",
-		"C:/Users/user/AppData/Local/Programs/Python/Python311/python.exe",
-	];
-	for (const cmd of candidates) {
-		try {
-			const { execFileSync } = await import("node:child_process");
-			execFileSync(cmd, ["--version"], { stdio: "pipe", timeout: 3000 });
-			return cmd;
-		} catch {}
-	}
-	return "python";
-}
 
 // Session entry types
 interface ChannelConfigEntry {
@@ -70,8 +24,8 @@ interface ProjectEntry {
 }
 
 export default function midiMonitorExtension(pi: ExtensionAPI) {
-	let pythonProcess: ChildProcess | null = null;
-	let ipc: MidiIPC | null = null;
+	let monitor: MidiMonitor | null = null;
+
 	// Default channel config for BeatStep Pro (Seq1=Ch1, Seq2=Ch2, Drum=Ch10)
 	let channelConfigs = new Map<number, ChannelConfig>([
 		[1, { channel: 1, name: "Bass", type: "bass", patternLength: 16 }],
@@ -83,115 +37,42 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 	let widgetEnabled = true;
 	let currentCtx: ExtensionContext | null = null;
 
-	// --- Process Management ---
+	// --- Monitor Management ---
 
-	async function startMonitor(): Promise<boolean> {
-		if (pythonProcess) return true;
+	function startMonitor(): boolean {
+		if (monitor) return true;
 
-		// Verify the script exists before spawning
-		if (!existsSync(PYTHON_SCRIPT)) {
-			console.error(`[midi-monitor] Python script not found at: ${PYTHON_SCRIPT}`);
-			console.error(`[midi-monitor] EXT_DIR resolved to: ${EXT_DIR}`);
-			console.error(`[midi-monitor] import.meta.url: ${import.meta.url}`);
+		try {
+			monitor = new MidiMonitor();
+			const opened = monitor.openPorts(); // auto-detect BeatStep Pro
+			console.error(`[midi-monitor] Opened ports: ${JSON.stringify(opened)}`);
+			return true;
+		} catch (err: any) {
+			console.error(`[midi-monitor] Failed to start: ${err.message}`);
+			monitor = null;
 			return false;
 		}
-
-		const pythonCmd = await findPython();
-		console.error(`[midi-monitor] Using python: ${pythonCmd}`);
-		console.error(`[midi-monitor] Script: ${PYTHON_SCRIPT}`);
-
-		return new Promise((resolve) => {
-			const proc = spawn(pythonCmd, [PYTHON_SCRIPT], {
-				stdio: ["pipe", "pipe", "pipe"],
-				windowsHide: true,
-			});
-
-			let stdout = "";
-			let stderrBuf = "";
-			let resolved = false;
-
-			proc.stdout?.on("data", (data) => {
-				stdout += data.toString();
-				// Split on \n and trim \r for Windows compatibility
-				const lines = stdout.split("\n").map(l => l.replace(/\r$/, ""));
-
-				for (const line of lines) {
-					if (line.startsWith("PORT:") && !resolved) {
-						const port = parseInt(line.slice(5));
-						ipc = new MidiIPC(port);
-					}
-					if (line === "READY" && !resolved) {
-						resolved = true;
-						pythonProcess = proc;
-						resolve(true);
-					}
-				}
-			});
-
-			proc.stderr?.on("data", (data) => {
-				const text = data.toString().trim();
-				stderrBuf += text + "\n";
-				console.error(`[midi-monitor] ${text}`);
-			});
-
-			proc.on("error", (err) => {
-				console.error(`[midi-monitor] spawn error: ${err.message}`);
-				if (!resolved) {
-					resolved = true;
-					resolve(false);
-				}
-			});
-
-			proc.on("exit", (code, sig) => {
-				console.error(`[midi-monitor] Process exited: code=${code} signal=${sig}`);
-				if (stderrBuf.trim()) console.error(`[midi-monitor] stderr: ${stderrBuf.trim()}`);
-				pythonProcess = null;
-				ipc = null;
-				if (!resolved) {
-					resolved = true;
-					resolve(false);
-				}
-			});
-
-			// Timeout after 10s
-			setTimeout(() => {
-				if (!resolved) {
-					resolved = true;
-					proc.kill();
-					resolve(false);
-				}
-			}, 10000);
-		});
 	}
 
-	async function stopMonitor() {
+	function stopMonitor() {
 		if (widgetInterval) {
 			clearInterval(widgetInterval);
 			widgetInterval = null;
 		}
-		if (ipc) {
-			try {
-				await ipc.quit();
-			} catch {}
-			ipc = null;
-		}
-		if (pythonProcess) {
-			pythonProcess.kill();
-			pythonProcess = null;
+		if (monitor) {
+			monitor.closePorts();
+			monitor = null;
 		}
 	}
 
 	// --- Widget ---
 
-	async function updateWidget() {
-		if (!ipc || !currentCtx?.hasUI || !widgetEnabled) return;
+	function updateWidget() {
+		if (!monitor || !currentCtx?.hasUI || !widgetEnabled) return;
 
 		try {
-			const [patterns, status] = await Promise.all([
-				ipc.getPatterns(),
-				ipc.getStatus(),
-			]);
-
+			const patterns = monitor.getAllPatterns();
+			const status = { playing: monitor.playing, bpm: monitor.bpm };
 			const lines = renderWidget(patterns, channelConfigs, status, 120);
 			currentCtx.ui.setWidget("midi-monitor", lines);
 		} catch {
@@ -201,7 +82,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 
 	function startWidget() {
 		if (widgetInterval) clearInterval(widgetInterval);
-		// Update widget every 2 seconds
 		widgetInterval = setInterval(updateWidget, 2000);
 		updateWidget();
 	}
@@ -226,7 +106,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 	]);
 
 	function restoreConfig(ctx: ExtensionContext) {
-		// Start with defaults, then override with any saved config
 		channelConfigs = new Map(DEFAULT_CONFIGS);
 		projectName = "";
 
@@ -261,27 +140,30 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		currentCtx = ctx;
 		restoreConfig(ctx);
 
-		const started = await startMonitor();
-		if (started) {
+		const started = startMonitor();
+		if (started && monitor) {
 			// Apply pattern lengths from config
 			for (const [ch, cfg] of channelConfigs) {
-				if (cfg.patternLength && ipc) {
-					await ipc.setPatternLength(ch, cfg.patternLength);
+				if (cfg.patternLength) {
+					monitor.setPatternLength(ch, cfg.patternLength);
 				}
 			}
 			if (ctx.hasUI) {
 				startWidget();
-				ctx.ui.notify("MIDI Monitor started. Press SHIFT+Play on BeatStep Pro to restart all sequences for pattern detection.", "info");
+				ctx.ui.notify(
+					"MIDI Monitor started. Press SHIFT+Play on BeatStep Pro to restart all sequences for pattern detection.",
+					"info",
+				);
 			}
 		} else {
 			if (ctx.hasUI) {
-				ctx.ui.notify(`MIDI monitor failed. Check pi's stderr log for details. Script: ${PYTHON_SCRIPT}`, "error");
+				ctx.ui.notify("MIDI monitor failed to start. Check pi's stderr log for details.", "error");
 			}
 		}
 	});
 
 	pi.on("session_shutdown", async () => {
-		await stopMonitor();
+		stopMonitor();
 		currentCtx = null;
 	});
 
@@ -291,7 +173,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 
 	// --- Keyboard Shortcut ---
 
-	// Note: ctrl+m = Enter in terminals, so we use ctrl+shift+m
 	pi.registerShortcut("ctrl+shift+m", {
 		description: "Toggle MIDI monitor widget",
 		handler: async (ctx) => {
@@ -309,7 +190,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 
 	// --- Tools ---
 
-	// Tool: List MIDI devices
 	pi.registerTool({
 		name: "midi_list_devices",
 		label: "MIDI Devices",
@@ -317,14 +197,14 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		promptSnippet: "List MIDI devices connected to the system",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			if (!ipc) {
+			if (!monitor) {
 				return {
 					content: [{ type: "text", text: "MIDI monitor is not running. It starts automatically on session start." }],
 					details: {},
 				};
 			}
 
-			const devices = await ipc.getDevices();
+			const devices = monitor.getDevices();
 			const lines = [
 				"## MIDI Devices",
 				"",
@@ -345,7 +225,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// Tool: Configure channels
 	pi.registerTool({
 		name: "midi_channel_config",
 		label: "MIDI Channel Config",
@@ -357,9 +236,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			action: StringEnum(["set", "list", "remove"] as const),
 			channel: Type.Optional(Type.Number({ description: "MIDI channel number (1-16)" })),
 			name: Type.Optional(Type.String({ description: "Instrument name, e.g. 'acid bass', 'lead synth'" })),
-			type: Type.Optional(
-				StringEnum(["bass", "lead", "drums", "pad", "fx", "other"] as const),
-			),
+			type: Type.Optional(StringEnum(["bass", "lead", "drums", "pad", "fx", "other"] as const)),
 			pattern_length: Type.Optional(
 				Type.Number({ description: "Pattern length in steps (16, 32, or 64). Default: 16" }),
 			),
@@ -374,9 +251,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 				}
 				const lines = [`## Channel Configuration${projectName ? ` (Project: ${projectName})` : ""}`, ""];
 				for (const [ch, cfg] of [...channelConfigs.entries()].sort((a, b) => a[0] - b[0])) {
-					lines.push(
-						`- **Channel ${ch}**: ${cfg.name} (${cfg.type}) — ${cfg.patternLength ?? 16} steps`,
-					);
+					lines.push(`- **Channel ${ch}**: ${cfg.name} (${cfg.type}) — ${cfg.patternLength ?? 16} steps`);
 				}
 				return {
 					content: [{ type: "text", text: lines.join("\n") }],
@@ -413,9 +288,8 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			channelConfigs.set(params.channel, cfg);
 			persistConfig();
 
-			// Update pattern length in monitor
-			if (ipc && cfg.patternLength) {
-				await ipc.setPatternLength(params.channel, cfg.patternLength);
+			if (monitor && cfg.patternLength) {
+				monitor.setPatternLength(params.channel, cfg.patternLength);
 			}
 
 			return {
@@ -430,7 +304,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// Tool: Read pattern
 	pi.registerTool({
 		name: "midi_read_pattern",
 		label: "MIDI Read Pattern",
@@ -449,17 +322,17 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			if (!ipc) {
+			if (!monitor) {
 				return {
 					content: [{ type: "text", text: "MIDI monitor is not running." }],
 					details: {},
 				};
 			}
 
-			const status = await ipc.getStatus();
+			const status = monitor.getStatus();
 
 			if (params.channel) {
-				const pattern = await ipc.getPattern(params.channel);
+				const pattern = monitor.getPattern(params.channel);
 				const config = channelConfigs.get(params.channel);
 				const text = renderPatternText(pattern, config);
 				const header = status.playing ? `Playing at ${status.bpm} BPM\n\n` : "Stopped\n\n";
@@ -470,7 +343,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			}
 
 			// All channels
-			const patterns = await ipc.getPatterns();
+			const patterns = monitor.getAllPatterns();
 			const sections: string[] = [];
 			const header = status.playing ? `Playing at ${status.bpm} BPM` : "Stopped";
 			sections.push(header);
@@ -493,7 +366,6 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// Tool: Get monitor status
 	pi.registerTool({
 		name: "midi_status",
 		label: "MIDI Status",
@@ -501,14 +373,14 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		promptSnippet: "Check MIDI monitor status (playing, BPM, channels)",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			if (!ipc) {
+			if (!monitor) {
 				return {
 					content: [{ type: "text", text: "MIDI monitor is not running." }],
 					details: {},
 				};
 			}
 
-			const status = await ipc.getStatus();
+			const status = monitor.getStatus();
 			const lines = [
 				`## MIDI Monitor Status`,
 				`- **State**: ${status.playing ? "▶ Playing" : "⏹ Stopped"}`,
@@ -550,12 +422,12 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			const cmd = (args ?? "").trim().toLowerCase();
 
 			if (cmd === "stop") {
-				await stopMonitor();
+				stopMonitor();
 				ctx.ui.setWidget("midi-monitor", []);
 				ctx.ui.notify("MIDI monitor stopped", "info");
 			} else if (cmd === "start" || cmd === "restart") {
-				await stopMonitor();
-				const started = await startMonitor();
+				stopMonitor();
+				const started = startMonitor();
 				if (started) {
 					startWidget();
 					ctx.ui.notify("MIDI monitor started", "success");
