@@ -259,7 +259,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			}
 			if (ctx.hasUI) {
 				startWidget();
-				ctx.ui.notify("MIDI Monitor started", "info");
+				ctx.ui.notify("MIDI Monitor started. Press SHIFT+Play on BeatStep Pro to restart all sequences for pattern detection.", "info");
 			}
 		} else {
 			if (ctx.hasUI) {
