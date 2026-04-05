@@ -7,6 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Container, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
@@ -74,7 +75,14 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			const patterns = monitor.getAllPatterns();
 			const status = { playing: monitor.playing, bpm: monitor.bpm };
 			const lines = renderWidget(patterns, channelConfigs, status, 120);
-			currentCtx.ui.setWidget("midi-monitor", lines);
+			// Use factory function to bypass pi's 10-line widget limit
+			currentCtx.ui.setWidget("midi-monitor", () => {
+				const container = new Container();
+				for (const line of lines) {
+					container.addChild(new Text(line, 1, 0));
+				}
+				return container;
+			});
 		} catch {
 			// Monitor may be restarting
 		}
@@ -182,7 +190,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("MIDI widget enabled", "info");
 			} else {
 				if (widgetInterval) clearInterval(widgetInterval);
-				ctx.ui.setWidget("midi-monitor", []);
+				ctx.ui.setWidget("midi-monitor", undefined);
 				ctx.ui.notify("MIDI widget hidden", "info");
 			}
 		},
@@ -423,7 +431,7 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 
 			if (cmd === "stop") {
 				stopMonitor();
-				ctx.ui.setWidget("midi-monitor", []);
+				ctx.ui.setWidget("midi-monitor", undefined);
 				ctx.ui.notify("MIDI monitor stopped", "info");
 			} else if (cmd === "start" || cmd === "restart") {
 				stopMonitor();

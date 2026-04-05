@@ -45,6 +45,22 @@ const TYPE_EMOJI: Record<string, string> = {
 	other: "🔊",
 };
 
+// Standard prefix width for all channel lines
+const LABEL_WIDTH = 10;
+const CELL_WIDTH = 4;
+
+// Beat markers on downbeats (1, 5, 9, 13)
+const BEAT_MARKERS = new Set([1, 5, 9, 13]);
+
+function makePrefix(emoji: string, channel: number, label: string): string {
+	return `${emoji} Ch${channel.toString().padStart(2)} ${label.padEnd(LABEL_WIDTH).slice(0, LABEL_WIDTH)} │ `;
+}
+
+function calcMaxSteps(prefixLen: number, maxWidth: number, patternLength: number): number {
+	const stepsAvailable = maxWidth - prefixLen;
+	return Math.min(patternLength, Math.floor(stepsAvailable / CELL_WIDTH));
+}
+
 /**
  * Render a single channel pattern as a compact step-sequencer line.
  */
@@ -55,13 +71,8 @@ export function renderPatternLine(
 ): string {
 	const emoji = config ? (TYPE_EMOJI[config.type] || "🔊") : "🔊";
 	const label = config?.name ?? `Ch${pattern.channel}`;
-
-	// Build prefix
-	const prefix = `${emoji} Ch${pattern.channel.toString().padStart(2)} ${label.padEnd(10).slice(0, 10)} │ `;
-
-	const stepsAvailable = maxWidth - prefix.length;
-	const cellWidth = 4;
-	const maxSteps = Math.min(pattern.pattern_length, Math.floor(stepsAvailable / cellWidth));
+	const prefix = makePrefix(emoji, pattern.channel, label);
+	const maxSteps = calcMaxSteps(prefix.length, maxWidth, pattern.pattern_length);
 
 	let cells = "";
 	for (let i = 0; i < maxSteps; i++) {
@@ -109,31 +120,30 @@ export function renderDrumLines(
 	// Sort by MIDI note number
 	const sortedNotes = [...activeNotes.entries()].sort((a, b) => a[0] - b[0]);
 
-	// Build the header row (no step data, just the channel label)
-	const headerPrefix = `${emoji} Ch${pattern.channel.toString().padStart(2)} ${label.padEnd(10).slice(0, 10)} │ `;
+	const headerPrefix = makePrefix(emoji, pattern.channel, label);
+	const maxSteps = calcMaxSteps(headerPrefix.length, maxWidth, pattern.pattern_length);
 
-	const stepsAvailable = maxWidth - headerPrefix.length;
-	const cellWidth = 4;
-	const maxSteps = Math.min(pattern.pattern_length, Math.floor(stepsAvailable / cellWidth));
-
-	// Step numbers header
-	let stepNums = "";
+	// Beat ruler on the drum header row
+	let ruler = "";
 	for (let i = 1; i <= maxSteps; i++) {
-		stepNums += i.toString().padEnd(4).slice(0, 4);
+		if (BEAT_MARKERS.has(i)) {
+			ruler += " ▼  ";
+		} else {
+			ruler += "    ";
+		}
 	}
 
 	const lines: string[] = [];
-	lines.push(`${headerPrefix}${stepNums}`);
+	lines.push(headerPrefix + ruler);
 
-	// Sub-row prefix: indented, with drum name
-	// e.g. "   ├ Kick (36)     │ "
+	// Sub-rows: " ├ Kick (36)     │ "
 	for (let idx = 0; idx < sortedNotes.length; idx++) {
 		const [midiNote, entry] = sortedNotes[idx];
 		const isLast = idx === sortedNotes.length - 1;
 		const branch = isLast ? "└" : "├";
 		const name = drumName(midiNote, entry.noteName);
 		const subLabel = `${name} (${midiNote})`;
-		const subPrefix = `   ${branch} ${subLabel.padEnd(14).slice(0, 14)} │ `;
+		const subPrefix = `${branch} ${subLabel.padEnd(16).slice(0, 16)} │ `;
 
 		let cells = "";
 		for (let i = 1; i <= maxSteps; i++) {
