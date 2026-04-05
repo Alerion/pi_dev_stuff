@@ -8,11 +8,12 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Container, Text } from "@mariozechner/pi-tui";
+import type { Theme } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { MidiMonitor, type PatternData, type MonitorStatus, type MidiDevices } from "./midi-engine.js";
-import { type ChannelConfig, renderWidget, renderPatternText } from "./renderer.js";
+import { type ChannelConfig, type VelocityStyler, renderWidget, renderPatternText } from "./renderer.js";
 
 // Session entry types
 interface ChannelConfigEntry {
@@ -74,9 +75,15 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 		try {
 			const patterns = monitor.getAllPatterns();
 			const status = { playing: monitor.playing, bpm: monitor.bpm };
-			const lines = renderWidget(patterns, channelConfigs, status, 120);
 			// Use factory function to bypass pi's 10-line widget limit
-			currentCtx.ui.setWidget("midi-monitor", () => {
+			// and to get access to theme for velocity styling
+			currentCtx.ui.setWidget("midi-monitor", (_tui: unknown, theme: Theme) => {
+				const velocityStyle: VelocityStyler = (text, velocity) => {
+					if (velocity <= 50) return theme.fg("dim", text);
+					if (velocity > 100) return theme.bold(theme.fg("warning", text));
+					return text;
+				};
+				const lines = renderWidget(patterns, channelConfigs, status, 120, velocityStyle);
 				const container = new Container();
 				for (const line of lines) {
 					container.addChild(new Text(line, 1, 0));

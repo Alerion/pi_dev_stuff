@@ -36,6 +36,14 @@ function drumName(midiNote: number, noteName: string): string {
 	return DRUM_NAMES[midiNote] ?? noteName;
 }
 
+/**
+ * Callback that applies visual weight to text based on MIDI velocity.
+ * When not provided, text is returned unstyled.
+ */
+export type VelocityStyler = (text: string, velocity: number) => string;
+
+const noStyle: VelocityStyler = (text) => text;
+
 const TYPE_EMOJI: Record<string, string> = {
 	bass: "🎵",
 	lead: "🎹",
@@ -68,6 +76,7 @@ export function renderPatternLine(
 	pattern: PatternData,
 	config: ChannelConfig | undefined,
 	maxWidth: number,
+	style: VelocityStyler = noStyle,
 ): string {
 	const emoji = config ? (TYPE_EMOJI[config.type] || "🔊") : "🔊";
 	const label = config?.name ?? `Ch${pattern.channel}`;
@@ -80,8 +89,9 @@ export function renderPatternLine(
 		if (!step || step.notes.length === 0) {
 			cells += " ·  ";
 		} else {
-			const name = step.notes[0].note_name;
-			cells += name.padEnd(4).slice(0, 4);
+			const note = step.notes[0];
+			const raw = note.note_name.padEnd(4).slice(0, 4);
+			cells += style(raw, note.velocity);
 		}
 	}
 
@@ -96,20 +106,21 @@ export function renderDrumLines(
 	pattern: PatternData,
 	config: ChannelConfig | undefined,
 	maxWidth: number,
+	style: VelocityStyler = noStyle,
 ): string[] {
 	const emoji = TYPE_EMOJI.drums;
 	const label = config?.name ?? `Ch${pattern.channel}`;
 
-	// Collect all active MIDI notes across the pattern
-	const activeNotes = new Map<number, { noteName: string; steps: Set<number> }>();
+	// Collect all active MIDI notes across the pattern (with velocity per step)
+	const activeNotes = new Map<number, { noteName: string; steps: Map<number, number> }>();
 	for (const step of pattern.steps) {
 		for (const note of step.notes) {
 			let entry = activeNotes.get(note.note);
 			if (!entry) {
-				entry = { noteName: note.note_name, steps: new Set() };
+				entry = { noteName: note.note_name, steps: new Map() };
 				activeNotes.set(note.note, entry);
 			}
-			entry.steps.add(step.step); // 1-indexed
+			entry.steps.set(step.step, note.velocity); // 1-indexed step -> velocity
 		}
 	}
 
@@ -147,8 +158,9 @@ export function renderDrumLines(
 
 		let cells = "";
 		for (let i = 1; i <= maxSteps; i++) {
-			if (entry.steps.has(i)) {
-				cells += " x  ";
+			const vel = entry.steps.get(i);
+			if (vel !== undefined) {
+				cells += style(" x  ", vel);
 			} else {
 				cells += " ·  ";
 			}
@@ -168,6 +180,7 @@ export function renderWidget(
 	channelConfigs: Map<number, ChannelConfig>,
 	status: { playing: boolean; bpm: number },
 	maxWidth: number,
+	style: VelocityStyler = noStyle,
 ): string[] {
 	const lines: string[] = [];
 
@@ -184,9 +197,9 @@ export function renderWidget(
 		const pat = patterns[chNum.toString()];
 		if (pat && pat.has_notes) {
 			if (config.type === "drums") {
-				lines.push(...renderDrumLines(pat, config, maxWidth));
+				lines.push(...renderDrumLines(pat, config, maxWidth, style));
 			} else {
-				lines.push(renderPatternLine(pat, config, maxWidth));
+				lines.push(renderPatternLine(pat, config, maxWidth, style));
 			}
 			rendered.add(chNum);
 		}
@@ -196,7 +209,7 @@ export function renderWidget(
 	for (const [chKey, pat] of Object.entries(patterns)) {
 		const chNum = parseInt(chKey);
 		if (!rendered.has(chNum) && pat.has_notes) {
-			lines.push(renderPatternLine(pat, undefined, maxWidth));
+			lines.push(renderPatternLine(pat, undefined, maxWidth, style));
 		}
 	}
 
