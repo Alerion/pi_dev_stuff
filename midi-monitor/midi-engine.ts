@@ -65,7 +65,7 @@ export interface MidiDevices {
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-function noteName(midiNote: number): string {
+export function noteName(midiNote: number): string {
 	const octave = Math.floor(midiNote / 12) - 1;
 	return `${NOTE_NAMES[midiNote % 12]}${octave}`;
 }

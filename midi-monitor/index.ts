@@ -12,8 +12,24 @@ import type { Theme } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
-import { MidiMonitor, type PatternData, type MonitorStatus, type MidiDevices } from "./midi-engine.js";
-import { type ChannelConfig, type VelocityStyler, renderWidget, renderPatternText } from "./renderer.js";
+import { MidiMonitor, noteName, type PatternData, type NoteInfo, type PatternStep, type MonitorStatus, type MidiDevices } from "./midi-engine.js";
+import { type ChannelConfig, type VelocityStyler, renderWidget, renderPatternText, renderPatternLine, renderDrumLines } from "./renderer.js";
+
+/** Parse a note name like "C3", "C#2", "Db1" to a MIDI note number. Returns -1 if invalid. */
+function parseNoteToMidi(name: string): number {
+	const NOTE_MAP: Record<string, number> = {
+		"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "Fb": 4,
+		"F": 5, "E#": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8, "Ab": 8,
+		"A": 9, "A#": 10, "Bb": 10, "B": 11, "Cb": 11,
+	};
+	const m = name.trim().match(/^([A-Ga-g][#b]?)(\-?\d+)$/);
+	if (!m) return -1;
+	const pc = NOTE_MAP[m[1][0].toUpperCase() + m[1].slice(1)];
+	if (pc === undefined) return -1;
+	const octave = parseInt(m[2]);
+	const midi = (octave + 1) * 12 + pc;
+	return (midi >= 0 && midi <= 127) ? midi : -1;
+}
 
 // Session entry types
 interface ChannelConfigEntry {
@@ -78,12 +94,12 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			// Use factory function to bypass pi's 10-line widget limit
 			// and to get access to theme for velocity styling
 			currentCtx.ui.setWidget("midi-monitor", (_tui: unknown, theme: Theme) => {
-				const velocityStyle: VelocityStyler = (text, velocity) => {
+				const style: VelocityStyler = (text, velocity) => {
 					if (velocity <= 50) return theme.fg("dim", text);
 					if (velocity > 100) return theme.bold(theme.fg("warning", text));
 					return text;
 				};
-				const lines = renderWidget(patterns, channelConfigs, status, 120, velocityStyle);
+				const lines = renderWidget(patterns, channelConfigs, status, 120, style);
 				const container = new Container();
 				for (const line of lines) {
 					container.addChild(new Text(line, 1, 0));
@@ -408,6 +424,118 @@ export default function midiMonitorExtension(pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
 				details: status,
+			};
+		},
+	});
+
+	/** Build PatternData + ChannelConfig from tool params */
+	function buildPatternFromParams(params: {
+		name: string;
+		type: "bass" | "lead" | "drums" | "pad" | "fx" | "other";
+		pattern_length?: number;
+		steps: { step: number; note: string; velocity?: number }[];
+	}): { pattern: PatternData; config: ChannelConfig } {
+		const patLen = params.pattern_length ?? 16;
+		const stepMap = new Map<number, NoteInfo[]>();
+		for (const s of params.steps) {
+			const midi = parseNoteToMidi(s.note);
+			if (midi < 0) continue;
+			const info: NoteInfo = {
+				note: midi,
+				note_name: noteName(midi),
+				velocity: s.velocity ?? 100,
+				gate_pct: 50,
+			};
+			const existing = stepMap.get(s.step) ?? [];
+			existing.push(info);
+			stepMap.set(s.step, existing);
+		}
+		const steps: PatternStep[] = [];
+		for (let i = 1; i <= patLen; i++) {
+			steps.push({ step: i, notes: stepMap.get(i) ?? [] });
+		}
+		return {
+			pattern: { channel: 0, steps, pattern_length: patLen, loop_count: 0, has_notes: stepMap.size > 0 },
+			config: { channel: 0, name: params.name, type: params.type, patternLength: patLen },
+		};
+	}
+
+	/** Render a pattern + config into styled TUI lines (same as widget). */
+	function renderStyledPatternLines(
+		pattern: PatternData,
+		config: ChannelConfig,
+		theme: Theme,
+		maxWidth: number = 120,
+	): string[] {
+		const style: VelocityStyler = (text, velocity) => {
+			if (velocity <= 50) return theme.fg("dim", text);
+			if (velocity > 100) return theme.bold(theme.fg("warning", text));
+			return text;
+		};
+		if (config.type === "drums") {
+			return renderDrumLines(pattern, config, maxWidth, style);
+		}
+		return [renderPatternLine(pattern, config, maxWidth, style)];
+	}
+
+	pi.registerTool({
+		name: "midi_render_pattern",
+		label: "MIDI Render Pattern",
+		description:
+			"Render a proposed MIDI pattern using the same step-sequencer visualization as the live monitor widget. " +
+			"Use this to visually present pattern ideas to the user. Provide steps as an array of {step, note, velocity} objects. " +
+			"Empty steps are shown as '·'. Velocity affects visual weight: ≤50 = dim, 51-100 = normal, >100 = bold+accent. " +
+			"The pattern is rendered as a styled TUI component in the chat (same look as the MIDI Monitor widget).",
+		promptSnippet: "Render a proposed MIDI pattern visually for the user",
+		promptGuidelines: [
+			"Use midi_render_pattern to visually present pattern proposals to the user.",
+			"For bass/lead: each step has one note (e.g. 'C3', 'D#2'). For drums: steps can have multiple notes (kick+hihat).",
+			"Set velocity to convey dynamics: ghost notes ~40, normal ~80-100, accents ~120.",
+			"Always render your proposals so the user can see them in the familiar step-sequencer format.",
+			"The tool renders patterns as styled TUI components with velocity coloring directly in the chat — no need to copy the output into your message.",
+		],
+		parameters: Type.Object({
+			name: Type.String({ description: "Pattern name, e.g. 'Acid Bass A', 'Minimal Techno Beat'" }),
+			type: StringEnum(["bass", "lead", "drums", "pad", "fx", "other"] as const),
+			pattern_length: Type.Optional(Type.Number({ description: "Pattern length in steps (default: 16)" })),
+			steps: Type.Array(
+				Type.Object({
+					step: Type.Number({ description: "Step number (1-based)" }),
+					note: Type.String({ description: "Note name, e.g. 'C3', 'F#2'. For drums use MIDI note names like 'C2' (kick=36), 'C#2' (snare=37), 'D2' (hihat=38)" }),
+					velocity: Type.Optional(Type.Number({ description: "Velocity 1-127 (default: 100)" })),
+				}),
+				{ description: "Array of step events. Steps not listed are silent." },
+			),
+		}),
+		// Custom TUI renderer — same velocity styling as the MIDI Monitor widget
+		renderResult(result, _options, theme, _context) {
+			const details = result.details as { pattern: PatternData; config: ChannelConfig } | undefined;
+			if (!details?.pattern) {
+				return new Text(result.content?.[0]?.text ?? "No pattern", 0, 0);
+			}
+			const { pattern, config } = details;
+			const lines = renderStyledPatternLines(pattern, config, theme);
+			const header = theme.bold(`${config.name}`) + theme.fg("muted", ` (${config.type}, ${pattern.pattern_length} steps)`);
+			const container = new Container();
+			container.addChild(new Text(header, 0, 0));
+			for (const line of lines) {
+				container.addChild(new Text(line, 0, 0));
+			}
+			return container;
+		},
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const { pattern, config } = buildPatternFromParams(params);
+
+			// Plain text for LLM context (compact step notation)
+			const noteSteps = params.steps.map(s => {
+				const vel = s.velocity ?? 100;
+				const accent = vel > 100 ? "!" : vel <= 50 ? "~" : "";
+				return `${s.step}:${accent}${s.note}`;
+			}).join(" ");
+
+			return {
+				content: [{ type: "text", text: `${params.name} (${params.type}, ${pattern.pattern_length} steps): ${noteSteps}` }],
+				details: { pattern, config },
 			};
 		},
 	});
