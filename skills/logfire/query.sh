@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: query.sh <sql> [limit]
 
 SQL="${1:?Usage: query.sh '<sql>' [limit]}"
-LIMIT="${2:-100}"
+LIMIT="${2:-20}"
 
 # Load .env from current working directory
 if [[ -f .env ]]; then

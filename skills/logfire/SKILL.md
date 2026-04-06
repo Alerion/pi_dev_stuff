@@ -24,9 +24,12 @@ Run from the **project root directory** (where `.env` lives):
 ```
 
 - First argument: SQL query (required)
-- Second argument: row limit (optional, default 100, max 10000)
+- Second argument: row limit (optional, default 20, max 10000)
 - Output: JSON with `columns` and `rows` arrays
 - Pipe through `jq` for formatting
+
+**Keep queries small.** Always use `LIMIT` in SQL (5-20 rows). When selecting `attributes`,
+use `LIMIT 1-3` — AI spans contain full prompts/responses and can be 10KB+ each.
 
 ## Data Model
 
@@ -167,7 +170,7 @@ When filtering by `trace_id`, use the complete 32-char hex value, not a prefix. 
 
 When investigating an issue:
 
-1. **Start broad**: query recent events or errors to understand what's happening
+1. **Start broad but small**: query recent events or errors with `LIMIT 10-20` to understand what's happening
 2. **Narrow down**: filter by time range, span name, or error type
 3. **Inspect details**: fetch full `attributes` for specific spans to see AI prompts/responses
 4. **Follow traces**: use `trace_id` to see the full chain of operations
