@@ -8,15 +8,34 @@
  * Not supported: Kitty (uses OSC 99), Terminal.app, Windows Terminal, Alacritty
  */
 
+import { execFile } from "node:child_process";
+import { platform } from "node:os";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Markdown, type MarkdownTheme } from "@mariozechner/pi-tui";
 
 /**
- * Send a desktop notification via OSC 777 escape sequence.
+ * Send a native desktop notification.
+ * - macOS: osascript (Notification Center)
+ * - Linux: notify-send (libnotify)
+ * Fires and forgets — errors are silently ignored.
  */
 const notify = (title: string, body: string): void => {
-	// OSC 777 format: ESC ] 777 ; notify ; title ; body BEL
-	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	const os = platform();
+	try {
+		if (os === "darwin") {
+			const escaped = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+			const script = body
+				? `display notification "${escaped(body)}" with title "${escaped(title)}"`
+				: `display notification "" with title "${escaped(title)}"`;
+			execFile("osascript", ["-e", script], () => {});
+		} else if (os === "linux") {
+			const args = [title];
+			if (body) args.push(body);
+			execFile("notify-send", args, () => {});
+		}
+	} catch {
+		// notification tool not available — skip silently
+	}
 };
 
 const isTextPart = (part: unknown): part is { type: "text"; text: string } =>
