@@ -10,8 +10,8 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
+import { complete, type UserMessage } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
@@ -34,6 +34,11 @@ interface ExtractedQuestion {
 interface ExtractionResult {
 	questions: ExtractedQuestion[];
 }
+
+type ExtractionUiResult =
+	| { status: "ok"; result: ExtractionResult }
+	| { status: "cancelled" }
+	| { status: "error"; error: string };
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering.
 
@@ -67,37 +72,6 @@ Example output:
   ]
 }`;
 
-const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
-
-/**
- * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
- */
-async function selectExtractionModel(
-	currentModel: Model<Api>,
-	modelRegistry: ModelRegistry,
-): Promise<Model<Api>> {
-	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
-	if (codexModel) {
-		const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
-		if (auth.ok) {
-			return codexModel;
-		}
-	}
-
-	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-	if (!haikuModel) {
-		return currentModel;
-	}
-
-	const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-	if (!auth.ok) {
-		return currentModel;
-	}
-
-	return haikuModel;
-}
-
 /**
  * Parse the JSON response from the LLM
  */
@@ -120,6 +94,22 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 	} catch {
 		return null;
 	}
+}
+
+function formatErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+
+	return String(error);
+}
+
+function truncateForError(text: string, maxLength: number = 800): string {
+	if (text.length <= maxLength) {
+		return text;
+	}
+
+	return `${text.slice(0, maxLength)}...`;
 }
 
 /**
@@ -445,13 +435,12 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Select the best model for extraction (prefer Codex mini, then haiku)
-			const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+			const extractionModel = ctx.model;
 
 			// Run extraction with loader UI
-			const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
+			const extractionResult = await ctx.ui.custom<ExtractionUiResult>((tui, theme, _kb, done) => {
 				const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
-				loader.onAbort = () => done(null);
+				loader.onAbort = () => done({ status: "cancelled" });
 
 				const doExtract = async () => {
 					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
@@ -471,7 +460,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					if (response.stopReason === "aborted") {
-						return null;
+						return { status: "cancelled" } satisfies ExtractionUiResult;
 					}
 
 					const responseText = response.content
@@ -479,29 +468,42 @@ export default function (pi: ExtensionAPI) {
 						.map((c) => c.text)
 						.join("\n");
 
-					return parseExtractionResult(responseText);
+					const parsed = parseExtractionResult(responseText);
+					if (!parsed) {
+						return {
+							status: "error",
+							error: `Model ${extractionModel.id} did not return valid JSON. Raw response:\n\n${truncateForError(responseText)}`,
+						} satisfies ExtractionUiResult;
+					}
+
+					return { status: "ok", result: parsed } satisfies ExtractionUiResult;
 				};
 
 				doExtract()
 					.then(done)
-					.catch(() => done(null));
+					.catch((error) => done({ status: "error", error: formatErrorMessage(error) }));
 
 				return loader;
 			});
 
-			if (extractionResult === null) {
+			if (extractionResult.status === "cancelled") {
 				ctx.ui.notify("Cancelled", "info");
 				return;
 			}
 
-			if (extractionResult.questions.length === 0) {
+			if (extractionResult.status === "error") {
+				ctx.ui.notify(`Extraction failed: ${extractionResult.error}`, "error");
+				return;
+			}
+
+			if (extractionResult.result.questions.length === 0) {
 				ctx.ui.notify("No questions found in the last message", "info");
 				return;
 			}
 
 			// Show the Q&A component
 			const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-				return new QnAComponent(extractionResult.questions, tui, done);
+				return new QnAComponent(extractionResult.result.questions, tui, done);
 			});
 
 			if (answersResult === null) {
