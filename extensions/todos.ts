@@ -1127,8 +1127,11 @@ function formatTodoHeading(todo: TodoFrontMatter): string {
 function buildRefinePrompt(todoId: string, title: string): string {
 	return (
 		`let's refine task ${formatTodoId(todoId)} "${title}": ` +
-		"Ask me for the missing details needed to refine the todo together. Do not rewrite the todo yet and do not make assumptions. " +
-		"Ask clear, concrete questions and wait for my answers before drafting any structured description.\n\n"
+		"Start by making reasonable assumptions and proposing a few concrete ideas for a minimal implementation. Do not write code. " +
+		"Do not rely on me to provide the full design up front; I can provide context, references, and corrections as we iterate. " +
+		"Prefer the smallest version that could make this todo work, and avoid adding non-essential complexity like elaborate interfaces, lots of parameters, logging, tracing, or extra abstractions unless they are clearly needed. " +
+		"Ask critical questions when they are needed to unblock the design or avoid likely mistakes, but don't turn this into a long questionnaire. " +
+		"Do not rewrite the todo yet; first brainstorm assumptions, tradeoffs, and the next concrete version of the task.\n\n"
 	);
 }
 
